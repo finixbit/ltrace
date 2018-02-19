@@ -2,7 +2,7 @@
 Simple Library calls tracer
 
 # Required libraries
-capstone
+capstone 
 finixbit/elf-parser
 
 # Installation

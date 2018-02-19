@@ -4,13 +4,10 @@
 #include <sys/mman.h> /* mmap, MAP_PRIVATE */
 #include "disassembler.h"
 #include "callsite.h"
-using namespace sdb;
 
 
-std::unordered_map<std::intptr_t, Callsite> Disassembler::disassemble_ins(
-    uint8_t code, int32_t code_size, std::intptr_t code_entry, bool print_ins = false) {
-
-    std::unordered_map<std::intptr_t, Callsite> callsites_map;
+void Disassembler::disassemble_callsites(
+    uint8_t* code, int32_t code_size, std::intptr_t code_entry, bool print_ins = false) {
     
     csh capstone_handle;
     cs_insn *disassembled_ins;
@@ -22,7 +19,7 @@ std::unordered_map<std::intptr_t, Callsite> Disassembler::disassemble_ins(
     }
 
     count = cs_disasm(
-        capstone_handle, code, code_size, code_entry 0, &disassembled_ins);
+        capstone_handle, code, code_size, code_entry, 0, &disassembled_ins);
 
     if (count > 0) {
         size_t j;
@@ -30,27 +27,26 @@ std::unordered_map<std::intptr_t, Callsite> Disassembler::disassemble_ins(
             if(print_ins)
                 print_disassembled_ins(disassembled_ins[j]);
 
-            if(!callsites_map.count(
-                (std::intptr_t)disassembled_ins[j].address)) {
+            if(std::string(disassembled_ins[j].mnemonic) != "call")
+                continue;
 
-                Callsite callsite;
-                callsite.m_cs_address = disassembled_ins[j].address;
-                callsite.m_cs_type = disassembled_ins[j].address;
-                callsite.m_cs_return_address = disassembled_ins[j+1].address;
-                callsite.m_cs_name = disassembled_ins[j+1].address;
-                callsites_map[disassembled_ins[j].address] = callsite;
+            auto addr = (std::intptr_t)disassembled_ins[j].address;
+            if(!Callsite::m_callsites_map.count(addr)) {
+
+                generate_callsite(
+                    disassembled_ins[j], disassembled_ins[j+1], false);
             }
         }
         cs_free(disassembled_ins, count);
     } else {
         std::cout << "ERROR: Failed to disassemble program ..." << std::endl;
+        exit(1);
     }
     cs_close(&capstone_handle);
-    return callsites_map;
 }
 
 void Disassembler::disassemble_ins(
-    uint8_t code, int32_t code_size, std::intptr_t code_entry, bool print_ins = false) {
+    uint8_t* code, int32_t code_size, std::intptr_t code_entry, bool print_ins = false) {
     
     csh capstone_handle;
     cs_insn *disassembled_ins;
@@ -62,7 +58,7 @@ void Disassembler::disassemble_ins(
     }
 
     count = cs_disasm(
-        capstone_handle, code, code_size, code_entry 0, &disassembled_ins);
+        capstone_handle, code, code_size, code_entry, 0, &disassembled_ins);
 
     if (count > 0) {
         size_t j;
@@ -83,4 +79,28 @@ void Disassembler::disassemble_ins(
 void Disassembler::print_disassembled_ins(cs_insn &disassembled_ins) {
     printf("0x%" PRIx64 ":\t%s\t\t%s\n", disassembled_ins.address, 
                     disassembled_ins.mnemonic, disassembled_ins.op_str);
+}
+
+void Disassembler::generate_callsite(
+    cs_insn &insn, cs_insn &next_insn, bool print)  {
+
+    Callsite cs;
+    cs.m_cs_address         = insn.address;
+    cs.m_cs_name            = std::string(insn.op_str);
+    cs.m_cs_target_resolved = false;
+    
+    try {
+        std::intptr_t ptr = std::stol(std::string(insn.op_str), nullptr, 0);
+        cs.m_cs_target_address = ptr;
+        cs.m_cs_target_resolved = true;
+    } catch(...) {}
+
+    try {
+        cs.m_cs_return_address = next_insn.address;
+    } catch(...) {}
+
+    Callsite::m_callsites_map[cs.m_cs_address] = cs;  
+
+    if(print)
+         print_disassembled_ins(insn); 
 }

@@ -1,32 +1,17 @@
-
 #include <iostream>
 #include <cstring>
 #include <sstream>
+#include <unordered_map>
 #include <unistd.h> /* fork() / execvp */
 #include <linux/types.h> // pid_t
 #include <sys/ptrace.h> /* ptrace */
 #include <sys/prctl.h> // prctl
 #include <signal.h> // SIGHUP
+#include "ltrace.h"
+#include "elf-parser/elf_parser.h"
+#include "callsite.h"
+using namespace elf_parser;
 
-
-// #include "breakpoints.h"
-// #include "disassembler.h"
-// #include "functions.h"
-
-class Debugger {
-    public:
-        Debugger (std::string &program_path): m_program_path{program_path} {   
-            
-        }
-        void run_debuggee(char* cmd[]);   
-        void run_debugger(pid_t child_pid);
-
-    private:
-        std::string m_program_path;
-        std::string m_program_argv;
-        std::string m_proc_program_path; 
-        pid_t m_child_pid;
-};
 
 int main(int argc, char* argv[]) {
     char usage_banner[] = "usage: ./sdb [<cmd>]\n";
@@ -69,19 +54,57 @@ void Debugger::run_debuggee(char* cmd[]) {
 
 void Debugger::run_debugger(pid_t child_pid) {
     m_child_pid = child_pid;
-    m_proc_program_path = "/proc/" + std::to_string(m_child_pid) + "exe";
+    m_proc_program_path = "/proc/" + std::to_string(m_child_pid) + "/exe";
+    wait_for_signal(m_child_pid);  
 
-    // Breakpoint::wait_for_signal(m_child_pid);  
+    auto relocs = get_relocations();
+    m_relocs = relocations_to_unordered_map(relocs);
 
-    // Section::get_sections(m_mem_program);
+    uint8_t* text_code;
+    std::intptr_t text_code_entry;
+    long text_code_size;
 
-    // Relocation::get_relocations(m_mem_program, 
-    //    Section::m_plt_vma_address, Section::m_plt_entry_size);    
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr*)get_memory_map();
+    text_code_entry = ehdr->e_entry;
+
+    auto segs = get_segments();
+    for(auto &seg: segs) {
+        if(seg.segment_type == "LOAD") {
+            text_code = &get_memory_map()[text_code_entry - seg.segment_virtaddr];
+            text_code_size = seg.segment_memsize;
+            break;
+        }
+    }
     
-    std::cout << "Setting Breakpoints ..." << std::endl;
-    //Breakpoint::set_breakpoints(m_child_pid);
+    disassemble_callsites(
+        text_code, text_code_size, text_code_entry, false);
 
-    std::cout << "Continue Execution  ..." << std::endl;
-    //Breakpoint::continue_execution(m_child_pid);
+    // set breakpoints
+    for(auto &cs_map: Callsite::m_callsites_map) {
+        auto &cs = cs_map.second;
+
+        if((!cs.m_cs_target_resolved) || (cs.m_cs_target_address == 0))
+            continue;
+
+        if(!m_relocs.count(cs.m_cs_target_address))
+            continue;
+        else
+            cs.m_cs_name = \
+                m_relocs[cs.m_cs_target_address].relocation_symbol_name;
+        
+        set_callsite_breakpoint(
+          child_pid, cs.m_cs_address, cs.m_cs_return_address);
+    }
+
+    // continue program execution
+    continue_execution(m_child_pid);
 }
 
+
+RELOC_MAP Debugger::relocations_to_unordered_map(std::vector<relocation_t> &rels) {
+    RELOC_MAP rmap;
+    for(auto &rel: rels) {
+        rmap[rel.relocation_plt_address] = rel;
+    }
+    return rmap;
+}
